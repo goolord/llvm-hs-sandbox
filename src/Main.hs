@@ -1,57 +1,31 @@
 {-# LANGUAGE 
     OverloadedStrings 
   , RecursiveDo
+  , ScopedTypeVariables
 #-}
 
 import JIT
 import LLVM.IRBuilder
 import Data.ByteString.Short (ShortByteString)
+import Data.Word
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.Type as AST
 import qualified LLVM.AST.IntegerPredicate as AST
 import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Float as F
 
-{-
-
-; ModuleID = 'ex'
-
-define void @equals42(<8 x i16>* %src0,i8* %dst0,i64 %len0) { ; i32()*
-entry:
-    %len = udiv exact i64 %len0, 8
-    br label %cond
-cond:
-    %i = phi i64 [ 0, %entry ], [ %isucc, %loop ]
-    %src = phi <8 x i16>* [ %src0, %entry ], [ %srcsucc, %loop ]
-    %dst = phi i8* [ %dst0, %entry ], [ %dstsucc, %loop ]
-    %cmp = icmp slt i64 %i, %len
-    br i1 %cmp, label %loop, label %end
-loop:
-    %isucc = add i64 %i, 1
-    %srcsucc = getelementptr <8 x i16>, <8 x i16>* %src, i64 1
-    %dstsucc = getelementptr i8, i8* %dst, i64 1
-    %val = load <8 x i16>, <8 x i16>* %src
-    %bits = icmp eq <8 x i16> %val, <i16 42,i16 42,i16 42,i16 42,i16 42,i16 42,i16 42,i16 42>
-    %res = bitcast <8 x i1> %bits to i8
-    store i8 %res, i8* %dst
-    br label %cond
-end:
-    ret void;
-}
-
--}
-
 var :: MonadIRBuilder m => ShortByteString -> m r -> m r
 var name ir = ir `named` name
 
-equals42 :: ModuleBuilder ()
-equals42 = do
-  function "equals42" 
-    [ (AST.ptr $ AST.VectorType 8 AST.i16,"src0")
+equalsVal :: Word32 -> Word32 -> ModuleBuilder ()
+equalsVal bitSz size = do
+  function "equalsVal" 
+    [ (AST.ptr $ AST.VectorType size (AST.IntegerType bitSz),"src0")
     , (AST.ptr AST.i8, "dst0")
     , (AST.i64, "len0")
+    , ((AST.IntegerType bitSz),"val0")
     ] AST.void 
-    $ \[src0, dst0, len0] -> mdo
+    $ \[src0, dst0, len0, val0] -> mdo
       ---
       entry <- freshName "entry"
       emitBlockStart entry
@@ -61,7 +35,7 @@ equals42 = do
       cond <- freshName "cond"
       emitBlockStart cond
       i <- var "i" $ phi [(AST.ConstantOperand $ C.Int 64 0, entry), (isucc, loop)]
-      src <- var "src" $ phi [(src0, entry), (srcsucc, loop) ]
+      src <- var "src" $ phi [(src0, entry), (srcsucc, loop)]
       dst <- var "dst" $ phi [(dst0, entry), (dstsucc, loop)]
       cmp <- var "cmp" $ icmp AST.SLT i len
       condBr cmp loop end
@@ -71,10 +45,17 @@ equals42 = do
       isucc <- var "isucc" $ add i (AST.ConstantOperand $ C.Int 64 1)
       srcsucc <- var "srcsucc" $ gep src [AST.ConstantOperand $ C.Int 64 1]
       dstsucc <- var "dstsucc" $ gep dst [AST.ConstantOperand $ C.Int 64 1]
-      val <- var "val" $ load src 128
-      bits <- var "bits" $ icmp AST.EQ val $ AST.ConstantOperand $ C.Vector $ fmap (C.Int 16) [42,42,42,42,42,42,42,42]
+      val <- var "val" $ load src 1024
+      bits <- var "bits" $ icmp AST.EQ val =<< do
+        vec0 <- alloca (AST.VectorType 1 $ AST.IntegerType bitSz) Nothing 1024
+        vec1 <- insertElement vec0 val0 (AST.ConstantOperand $ C.Int 32 0)
+        vec2 <- load vec1 1024
+        shuffleVector 
+          vec2
+          (AST.ConstantOperand $ C.Vector [C.Int bitSz 0]) 
+          (C.Vector $ replicate (fromIntegral size) (C.Int 32 0))
       res <- var "res" $ bitcast bits AST.i8
-      store res 1 dst
+      store res 1024 dst
       br cond
       ---
       end <- freshName "end"
@@ -85,6 +66,6 @@ equals42 = do
 
 main :: IO AST.Module
 main = do
-  let ast = buildModule "ex" equals42
+  let ast = buildModule "ex" (equalsVal 32 16)
   rc <- runJIT ast
   pure ast
